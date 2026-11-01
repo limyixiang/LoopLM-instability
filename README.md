@@ -10,27 +10,55 @@ A decoder-only transformer where a shared-weight layer stack is applied recurren
 - **Sandwich normalization** — RMSNorm before both attention and FFN (critical for recurrent stability)
 - **Exit gate** — at each step, a learned gate predicts whether to stop early
 - **Multi-step loss** — all T steps contribute to training via a weighted sum, where weights come from the learned exit distribution
-- **SwiGLU FFN**, **RoPE** positional encoding, 49,152 token vocabulary (SmolLM2 tokenizer)
+- **SwiGLU FFN**, **RoPE** positional encoding, 49,152 token vocabulary (pinned Ouro tokenizer for reproduction; SmolLM2 for legacy runs)
 
 ## Setup
 
-Requires [uv](https://docs.astral.sh/uv/).
+The reproduction pilot supports standard Python `venv` and pip; `uv` is optional.
+See [REPRODUCTION.md](REPRODUCTION.md) for the CUDA/PyTorch installation choice,
+the separate reference checker, and offline cluster setup.
 
 ```bash
 git clone <repo>
 cd looplm
-uv sync
+python3 -m venv .venv
+source .venv/bin/activate
+# Install a CUDA-enabled PyTorch build appropriate for your cluster first.
+python -m pip install -r requirements-reproduction.txt
+export PYTHON_BIN="$PWD/.venv/bin/python"
 ```
+
+## Instability reproduction pilot
+
+The reproduction harness is implemented; no H100 instability results have been
+established by this patch. See [REPRODUCTION.md](REPRODUCTION.md) for preparation,
+screening, matched four/eight-loop runs, replay, and output interpretation.
+
+Use `scripts/train.py --reproduction` for the controlled pilot. Its `small_repro`
+preset has approximately 118M parameters, untied embeddings, and the released
+Ouro loop-boundary normalization. The existing `small` preset retains the legacy
+approximately 80M architecture. Shared RMSNorm and probability reductions now use
+FP32 where needed; bitwise agreement with older BF16 runs is not promised.
+
+The pilot retains the original joint objective and full recurrent backpropagation.
+Detached-gate and uniform-supervision interventions remain future work, conditional
+on reproducing a meaningful instability.
+
+The primary corpus is a fixed, pinned FineWeb-Edu subset with content-hash-based
+document splits. Preparation defaults to the pinned released Ouro tokenizer;
+SmolLM2 has different special-token mappings despite the same vocabulary size.
+Raw WikiText-103 (`wikitext-103-raw-v1`) is an optional pipeline smoke test, with
+row-level separation rather than reconstructed article-level separation.
 
 ## Training
 
 ### Local
 
 ```bash
-uv run scripts/train.py \
+python scripts/train.py \
     --model-config small \
     --dataset wikitext \
-    --dataset-config wikitext-103-v1 \
+    --dataset-config wikitext-103-raw-v1 \
     --max-steps 10000 \
     --batch-size 8 \
     --seq-len 512 \
@@ -59,7 +87,7 @@ uv run scripts/train.py \
 
   # After all complete, aggregate results
   ```bash
-  uv run scripts/analyze.py mano-collect --input-dir ${SCRATCH}/looplm/mano
+  python scripts/analyze.py mano-collect --input-dir ${SCRATCH}/looplm/mano
   ```
 
 ### JUWELS (westai / H100)
@@ -67,42 +95,45 @@ uv run scripts/train.py \
 **One-time setup on login node** (needs internet):
 
 ```bash
-uv sync
-bash scripts/download_artifacts.sh   # caches tokenizer + dataset into $PROJECT/hf_cache
+source .venv/bin/activate
+export PYTHON_BIN="$PWD/.venv/bin/python"
+bash scripts/download_artifacts.sh   # prepares the bounded pinned FineWeb-Edu pilot
 ```
 
 **Submit job:**
 
 ```bash
-# Set --account in scripts/train.slurm first, then:
-sbatch scripts/train.slurm
+# Supply the prepared directories and your account/partition:
+export REPO_DIR="$PWD"
+export PYTHON_BIN="$PWD/.venv/bin/python"
+export TRAIN_DATA_DIR="${SCRATCH}/looplm/data/reproduction_fineweb_edu/train"
+export VAL_DATA_DIR="${SCRATCH}/looplm/data/reproduction_fineweb_edu/validation"
+sbatch --export=ALL --account=YOUR_ACCOUNT --partition=YOUR_GPU_PARTITION scripts/reproduce.sh
 ```
 
 **Monitor:**
 
 ```bash
 squeue --me
-tail -f $(ls -t ${SCRATCH}/looplm/logs/*.out | head -1)
+tail -f ouro_reproduce_<job-id>.out
 ```
 
-**After completion — sync wandb from login node:**
-
-```bash
-wandb sync ${SCRATCH}/looplm/wandb/offline-run-*/
-```
-
-Compute nodes have no internet access. The SLURM script sets `HF_DATASETS_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and `WANDB_MODE=offline` automatically.
+The reproduction harness writes local JSONL metrics and checkpoints; see
+[REPRODUCTION.md](REPRODUCTION.md) for interpretation. Stage prepared data and
+installed dependencies before using an offline compute node. The legacy
+`scripts/train.slurm` supports offline wandb logging for legacy runs.
+It also accepts `PYTHON_BIN`; install `wandb` in that environment if using it.
 
 ## Running Tests
 
 ```bash
-uv run --with pytest pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
 Stop at first failure:
 
 ```bash
-uv run --with pytest pytest tests/ -x -v
+python -m pytest tests/ -x -v
 ```
 
 ## Project Structure

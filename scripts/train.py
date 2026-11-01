@@ -2,10 +2,10 @@
 """Entry point for LoopLM pre-training (Stage I).
 
 Quick test run:
-    uv run scripts/train.py --max-steps 1000 --batch-size 4 --seq-len 512
+    python scripts/train.py --max-steps 1000 --batch-size 4 --seq-len 512
 
 Full small-scale run (~100M, wikitext-103):
-    uv run scripts/train.py --max-steps 10000 --batch-size 8 --seq-len 1024
+    python scripts/train.py --max-steps 10000 --batch-size 8 --seq-len 1024
 """
 
 import argparse
@@ -33,8 +33,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train a LoopLM model")
 
     # Model
-    p.add_argument("--model-config", default="small",
-                   choices=["small", "ouro_1_4b", "ouro_2_6b"])
+    p.add_argument("--model-config", default=None,
+                   choices=["small", "small_repro", "ouro_1_4b", "ouro_2_6b"])
     # Model config overrides (applied after loading preset)
     p.add_argument("--hidden-size", type=int, default=None)
     p.add_argument("--num-layers", type=int, default=None)
@@ -47,9 +47,10 @@ def parse_args():
 
     # Data
     p.add_argument("--dataset", default="wikitext")
-    p.add_argument("--dataset-config", default="wikitext-103-v1")
+    p.add_argument("--dataset-config", default="wikitext-103-raw-v1")
     p.add_argument("--split", default="train")
-    p.add_argument("--tokenizer-id", default="HuggingFaceTB/SmolLM2-135M")
+    p.add_argument("--tokenizer-id", default=None)
+    p.add_argument("--tokenizer-revision", default=None)
     p.add_argument("--max-chunks", type=int, default=None,
                    help="Cap number of training chunks (for quick runs)")
     p.add_argument("--data-dir", default=None,
@@ -70,8 +71,26 @@ def parse_args():
     p.add_argument("--gradient-checkpointing", action="store_true",
                    help="Enable gradient checkpointing to reduce memory")
     p.add_argument("--device", default="auto")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--data-seed", type=int, default=None)
+    p.add_argument("--warmup-steps", type=int, default=None)
+    p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--resume-from", default=None,
                    help="Path to checkpoint to resume training from")
+    p.add_argument("--resume-lr", type=float, default=None,
+                   help="Explicitly override peak LR after restoring optimizer state")
+    p.add_argument("--reproduction", action="store_true",
+                   help="Joint-objective single-GPU pilot with replay, JSONL, and held-out CE")
+    p.add_argument("--val-data-dir", default=None)
+    p.add_argument("--val-every", type=int, default=100)
+    p.add_argument("--val-tokens", type=int, default=131072)
+    p.add_argument("--endpoint-val-tokens", type=int, default=2000000)
+    p.add_argument("--test-data-dir", default=None,
+                   help="Optional untouched test corpus, evaluated only at the final endpoint")
+    p.add_argument("--test-tokens", type=int, default=2000000)
+    p.add_argument("--keep-checkpoints", type=int, default=5)
+    p.add_argument("--keep-event-checkpoints", type=int, default=3)
+    p.add_argument("--deterministic", action="store_true")
 
     # Multi-stage training (0 = skip that stage)
     p.add_argument("--stage1a-steps", type=int, default=0,
@@ -97,12 +116,21 @@ def parse_args():
     p.add_argument("--eval-limit", type=int, default=None,
                    help="Max examples per task during periodic eval (default: full).")
 
-    return p.parse_args()
+    args = p.parse_args()
+    args.model_config = args.model_config or ("small_repro" if args.reproduction else "small")
+    from src.training.corpus import OURO_TOKENIZER, OURO_TOKENIZER_REVISION
+    args.tokenizer_id = args.tokenizer_id or (OURO_TOKENIZER if args.reproduction else "HuggingFaceTB/SmolLM2-135M")
+    if args.reproduction and args.tokenizer_id == OURO_TOKENIZER and args.tokenizer_revision is None:
+        args.tokenizer_revision = OURO_TOKENIZER_REVISION
+    args.data_seed = args.seed if args.data_seed is None else args.data_seed
+    args.warmup_steps = (200 if args.reproduction else 0) if args.warmup_steps is None else args.warmup_steps
+    return args
 
 
 def build_model_config(args) -> LoopLMConfig:
     configs = {
         "small": LoopLMConfig.small(),
+        "small_repro": LoopLMConfig.small_repro(),
         "ouro_1_4b": LoopLMConfig.ouro_1_4b(),
         "ouro_2_6b": LoopLMConfig.ouro_2_6b(),
     }
@@ -195,6 +223,9 @@ def print_summary(history: dict, num_recurrent_steps: int) -> None:
 
 def main():
     args = parse_args()
+    if args.reproduction:
+        from src.training.reproduction import run_reproduction
+        raise SystemExit(run_reproduction(args, build_model_config(args)))
 
     # ── Distributed training setup ────────────────────────────────────────────
     import os
@@ -229,6 +260,8 @@ def main():
         beta_kl=args.beta_kl,
         num_recurrent_steps=args.num_recurrent_steps,
         grad_accum_steps=args.grad_accum_steps,
+        seed=args.seed,
+        warmup_steps=args.warmup_steps,
         use_amp=not args.no_amp,
         stages=stages,
         log_every=args.log_every,
@@ -283,6 +316,8 @@ def main():
             data_dir=args.data_dir,
             seq_len=args.seq_len,
             micro_batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            seed=args.data_seed,
         )
     else:
         dataloader = make_dataloader(
@@ -293,6 +328,7 @@ def main():
             seq_len=args.seq_len,
             batch_size=args.batch_size,
             max_chunks=args.max_chunks,
+            seed=args.data_seed,
         )
 
     trainer = Trainer(model_cfg, trainer_cfg, model_kwargs=model_kwargs)
@@ -305,7 +341,7 @@ def main():
 
     # Resume from checkpoint if specified
     if args.resume_from:
-        resumed_step = trainer.load_checkpoint(args.resume_from)
+        resumed_step = trainer.load_checkpoint(args.resume_from, lr_override=args.resume_lr)
         if rank == 0:
             print(f"Resumed from step {resumed_step}")
 

@@ -1,27 +1,19 @@
 #!/usr/bin/env bash
-# Run on login node (has internet). Downloads tokenizer + dataset into
-# $PROJECT/hf_cache so compute nodes can read them offline.
+# Run on a preparation/login node. Fetches pinned tokenizer assets and streams
+# only the bounded FineWeb-Edu selection; no full-corpus download or GPU use.
 set -euo pipefail
 
-HF_CACHE="${PROJECT}/hf_cache"
-export HF_HOME="$HF_CACHE"
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    echo "Python executable not found: $PYTHON_BIN. Set PYTHON_BIN to your environment's bin/python." >&2
+    exit 1
+fi
+export HF_HOME="${HF_HOME:-${PROJECT:-.}/hf_cache}"
+DATA_ROOT="${REPRO_DATA_DIR:-${SCRATCH:-.}/looplm/data/reproduction_fineweb_edu}"
 
-echo "==> Downloading to $HF_CACHE"
-mkdir -p "$HF_CACHE"
+mkdir -p "$HF_HOME"
+echo "==> Preparing the bounded pilot corpus at $DATA_ROOT"
+"$PYTHON_BIN" scripts/prepare_reproduction_data.py --output-dir "$DATA_ROOT" "$@"
 
-uv run python - <<'EOF'
-import os
-from transformers import AutoTokenizer
-from datasets import load_dataset
-
-print("Downloading tokenizer...")
-AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M")
-
-print("Downloading wikitext-103-v1 (train split)...")
-load_dataset("wikitext", "wikitext-103-v1", split="train")
-
-print("Done. All artifacts cached.")
-EOF
-
-echo "==> Cache location: $HF_CACHE"
-du -sh "$HF_CACHE"
+echo "==> Use $DATA_ROOT/train and $DATA_ROOT/validation on the GPU node"

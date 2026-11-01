@@ -12,7 +12,9 @@
 
 set -euo pipefail
 
-module load uv
+# Load any site-required Python/CUDA modules before submission (and here if
+# your cluster requires reloading them in batch jobs). No package installation.
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 REPO_DIR="${PROJECT}/LoopLM"
@@ -37,7 +39,7 @@ echo "==> CKPT_DIR: $CKPT_DIR"
 echo "==> WANDB_DIR: $WANDB_DIR"
 
 cd "$REPO_DIR"
-uv run scripts/train.py \
+"$PYTHON_BIN" scripts/train.py \
     --model-config    small       \
     --dataset         wikitext    \
     --dataset-config  wikitext-103-v1 \

@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -14,6 +14,10 @@ class LoopLMConfig:
     rope_base: float = 10000.0
     dropout: float = 0.0
     beta_kl: float = 0.1
+    # Defaults retain the architecture used by existing checkpoints.
+    tie_word_embeddings: bool = True
+    normalize_recurrent_state: bool = False
+    fp32_gate: bool = False
 
     def num_parameters(self) -> int:
         """Estimate total parameter count."""
@@ -26,10 +30,17 @@ class LoopLMConfig:
         #   4 RMSNorm (sandwich: pre-attn, post-attn, pre-ffn, post-ffn) — each hidden_size params
         norms = 4 * self.hidden_size
         layer = attn + ffn + norms
-        # LM head (tied with embedding by convention, so not counted separately)
+        # Readout norm, optional untied LM head, and exit gate.
         # Exit gate: hidden_size -> 1
         gate = self.hidden_size + 1
-        return embed + self.num_layers * layer + gate
+        head = 0 if self.tie_word_embeddings else embed
+        return embed + head + self.num_layers * layer + self.hidden_size + gate
+
+    @classmethod
+    def small_repro(cls) -> "LoopLMConfig":
+        """~118M pilot matching released Ouro's loop-boundary normalization."""
+        return cls(tie_word_embeddings=False, normalize_recurrent_state=True,
+                   fp32_gate=True)
 
     @classmethod
     def small(cls) -> "LoopLMConfig":

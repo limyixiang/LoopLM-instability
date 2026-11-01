@@ -14,8 +14,9 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: Tensor) -> Tensor:
-        norm = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
-        return x * norm * self.weight
+        work = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+        norm = work.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
+        return (work * norm).to(x.dtype) * self.weight
 
 
 class SwiGLUFFN(nn.Module):

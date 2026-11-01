@@ -40,7 +40,7 @@ def tokenize_and_chunk(texts: list[str], tokenizer, seq_len: int) -> Tensor:
 
 def make_dataloader(
     dataset_name: str = "wikitext",
-    dataset_config: str = "wikitext-103-v1",
+    dataset_config: str = "wikitext-103-raw-v1",
     split: str = "train",
     tokenizer_id: str = "HuggingFaceTB/SmolLM2-135M",
     seq_len: int = 512,
@@ -48,6 +48,7 @@ def make_dataloader(
     max_chunks: int | None = None,
     shuffle: bool = True,
     text_column: str = "text",
+    seed: int = 42,
 ) -> DataLoader:
     """Load a HuggingFace text dataset and return a ready-to-use DataLoader.
 
@@ -120,6 +121,7 @@ def make_dataloader(
         shuffle=shuffle,
         drop_last=True,
         collate_fn=_collate,
+        generator=torch.Generator().manual_seed(seed),
     )
 
 
@@ -158,6 +160,9 @@ class PreTokenizedDataset(IterableDataset):
             rank = dist.get_rank()
             world_size = dist.get_world_size()
             shard_paths = shard_paths[rank::world_size]
+        worker = torch.utils.data.get_worker_info()
+        if worker is not None:
+            shard_paths = shard_paths[worker.id::worker.num_workers]
 
         remainder = np.array([], dtype=np.uint16)
 
@@ -183,7 +188,7 @@ def make_pretokenized_dataloader(
     data_dir: str,
     seq_len: int = 4096,
     micro_batch_size: int = 2,
-    num_workers: int = 2,
+    num_workers: int = 0,
     seed: int = 42,
 ) -> DataLoader:
     """Create a streaming DataLoader from pre-tokenized .npy shards."""

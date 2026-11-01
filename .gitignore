@@ -16,6 +16,7 @@ env/
 
 # uv
 .uv/
+wheelhouse/
 
 # Testing
 .pytest_cache/

@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -43,7 +45,7 @@ def compute_looplm_loss(
             ignore_index=ignore_index,
             reduction="none",
         ).view(B, S)
-        ce_per_step.append(ce)
+        ce_per_step.append(ce.float())
 
     # ── Exit distribution ────────────────────────────────────────────────────
     # p(t|x): (T, B, S) — sums to 1 over dim 0
@@ -79,7 +81,11 @@ def compute_looplm_loss(
         "task_loss": task_loss.detach(),
         "entropy": mean_entropy.detach(),
         "avg_exit_step": mean_avg_exit_step.detach(),
-        "per_step_losses": [ce.mean().detach() for ce in ce_per_step],
+        "per_step_losses": [((ce * mask).sum() / n_valid).detach() for ce in ce_per_step],
+        "uniform_ce": ((ce_stack.mean(dim=0) * mask).sum() / n_valid).detach(),
+        "exit_probs": [(p * mask).sum().detach() / n_valid for p in exit_probs],
+        "normalized_entropy": mean_entropy.detach() / max(math.log(T), 1.0e-12),
+        "valid_tokens": mask.sum().detach(),
     }
 
     return total_loss, diagnostics

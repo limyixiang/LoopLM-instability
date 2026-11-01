@@ -1,0 +1,8 @@
+# Core packages for preparation, reproduction training, and CPU checks.
+# Install a cluster-compatible CUDA build of torch separately (see REPRODUCTION.md).
+# These are core pins, not a full transitive lock; save pip freeze after installation.
+numpy==2.2.6
+transformers==5.2.0
+datasets==4.5.0
+PyYAML==6.0.3
+pytest==9.2.0

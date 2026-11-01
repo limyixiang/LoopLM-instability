@@ -1,0 +1,210 @@
+{
+  "ouro": {
+    "repository": "ByteDance/Ouro-1.4B",
+    "revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1",
+    "vocab_size": 49152,
+    "vocab_sha256": "5e5764d5049967b7aa8c77b3d7ed329593030befbf06f74dad56c2c7579d3aa7",
+    "files_sha256": {
+      "tokenizer.json": "fcb808fe5e7642f5299be28aea07fc7f6d4f4364c3ac5e408e15a772cbc8fa8d",
+      "tokenizer_config.json": "7e010da95d71b0fa1aa809552922c74cc1dd98d628f21ba39ca6c35aa18d5d91",
+      "special_tokens_map.json": "55087bb8409060d9cb0f80495e34f4e0d8a84f68a799a6b0cab3132be0aae319"
+    },
+    "backend_sha256": "ea2e762e878101fd45d6492031913abafbf769abd415deb4fa5a993bbdf1df7b",
+    "settings": {
+      "special_tokens_map": {
+        "bos_token": "<|endoftext|>",
+        "eos_token": "<|endoftext|>",
+        "unk_token": "<|endoftext|>"
+      },
+      "bos_token_id": 0,
+      "eos_token_id": 0,
+      "pad_token_id": null,
+      "add_bos_token": false,
+      "add_eos_token": false,
+      "padding_side": "right",
+      "truncation_side": "right",
+      "clean_up_tokenization_spaces": false
+    },
+    "fingerprint": "e60b706aef517a29eddc81888960e7b93298179a5c07f1ac4aaefa6dca357e71",
+    "encoding": "add_special_tokens=False; append one EOS per complete source record"
+  },
+  "smollm2": {
+    "repository": "HuggingFaceTB/SmolLM2-135M",
+    "revision": "93efa2f097d58c2a74874c7e644dbc9b0cee75a2",
+    "vocab_size": 49152,
+    "vocab_sha256": "7fc3b488e0654b519ba97fb5d30821d8172edb8c67ad24e2afc62de18d89dbc5",
+    "files_sha256": {
+      "tokenizer.json": "9ca9acddb6525a194ec8ac7a87f24fbba7232a9a15ffa1af0c1224fcd888e47c",
+      "tokenizer_config.json": "4bb9af56a342753d39374f4016a16574cab299fe088e896f425ce3c433f61424",
+      "special_tokens_map.json": "e786b595b9a23148bf1630df78d9037a048ea671e48bfd3549a1e3c233742bb3"
+    },
+    "backend_sha256": "9ac86d258175656f121644fad038f7fe55d7cefceb87830ff637a0acc7bf3a90",
+    "settings": {
+      "special_tokens_map": {
+        "bos_token": "<|endoftext|>",
+        "eos_token": "<|endoftext|>",
+        "unk_token": "<|endoftext|>"
+      },
+      "bos_token_id": 0,
+      "eos_token_id": 0,
+      "pad_token_id": null,
+      "add_bos_token": false,
+      "add_eos_token": false,
+      "padding_side": "right",
+      "truncation_side": "right",
+      "clean_up_tokenization_spaces": false
+    },
+    "fingerprint": "dfdb5dec07a70d712d372dd4c23bcb120106c858a0224007016500239cfacf08",
+    "encoding": "add_special_tokens=False; append one EOS per complete source record"
+  },
+  "equivalent": false,
+  "vocabulary_differences": [
+    {
+      "token": "</think>",
+      "ouro_id": 4,
+      "smollm2_id": null
+    },
+    {
+      "token": "<repo_name>",
+      "ouro_id": null,
+      "smollm2_id": 3
+    },
+    {
+      "token": "<reponame>",
+      "ouro_id": null,
+      "smollm2_id": 4
+    },
+    {
+      "token": "<think>",
+      "ouro_id": 3,
+      "smollm2_id": null
+    }
+  ],
+  "encoding_probes": [
+    {
+      "text": "A short English sentence.",
+      "ouro": [
+        49,
+        1890,
+        2321,
+        6330,
+        30
+      ],
+      "smollm2": [
+        49,
+        1890,
+        2321,
+        6330,
+        30
+      ]
+    },
+    {
+      "text": "中文 café naïve 😀",
+      "ouro": [
+        28589,
+        29184,
+        37366,
+        15486,
+        46494,
+        40303,
+        218
+      ],
+      "smollm2": [
+        28589,
+        29184,
+        37366,
+        15486,
+        46494,
+        40303,
+        218
+      ]
+    },
+    {
+      "text": "def f(x):\n    return x + 1\n",
+      "ouro": [
+        1604,
+        275,
+        24,
+        104,
+        727,
+        472,
+        1003,
+        1792,
+        1232,
+        216,
+        33,
+        198
+      ],
+      "smollm2": [
+        1604,
+        275,
+        24,
+        104,
+        727,
+        472,
+        1003,
+        1792,
+        1232,
+        216,
+        33,
+        198
+      ]
+    },
+    {
+      "text": "<think>42</think>",
+      "ouro": [
+        3,
+        36,
+        34,
+        4
+      ],
+      "smollm2": [
+        44,
+        17400,
+        46,
+        36,
+        34,
+        9617,
+        17400,
+        46
+      ]
+    },
+    {
+      "text": "<repo_name>org/project<reponame>",
+      "ouro": [
+        44,
+        22139,
+        79,
+        1245,
+        46,
+        2295,
+        31,
+        8348,
+        44,
+        10368,
+        46
+      ],
+      "smollm2": [
+        3,
+        2295,
+        31,
+        8348,
+        4
+      ]
+    },
+    {
+      "text": "<|endoftext|>",
+      "ouro": [
+        0
+      ],
+      "smollm2": [
+        0
+      ]
+    }
+  ],
+  "selected_default": {
+    "repository": "ByteDance/Ouro-1.4B",
+    "revision": "574fa66cb8bf5abdc979642d01cf2b79b16bfab1"
+  },
+  "scope": "Tokenizer asset and encoding verification only; no corpus download or GPU training"
+}

@@ -16,6 +16,7 @@ class LoopLMOutput(NamedTuple):
     exit_lambdas: list[Tensor] # each (B, S) — raw sigmoid gate outputs λ_t
     q_values: list[Tensor] | None = None  # each (B, S, 2) — Q(halt), Q(continue)
     aux_losses: list[Tensor] | None = None  # auxiliary losses (e.g. MoE load balance)
+    diagnostics: dict[str, list[Tensor]] | None = None
 
 
 def compute_exit_distribution(exit_lambdas: list[Tensor]) -> Tensor:
@@ -32,9 +33,10 @@ def compute_exit_distribution(exit_lambdas: list[Tensor]) -> Tensor:
     """
     T = len(exit_lambdas)
     probs = []
-    survival = torch.ones_like(exit_lambdas[0])  # S_0 = 1
+    survival = torch.ones_like(exit_lambdas[0], dtype=torch.float32)  # S_0 = 1
 
     for t, lam in enumerate(exit_lambdas):
+        lam = lam.float()
         if t < T - 1:
             p_t = lam * survival
             survival = survival * (1.0 - lam)
@@ -103,7 +105,8 @@ class LoopLM(nn.Module):
             self.q_head = nn.Linear(config.hidden_size, 2, bias=True)
 
         # Tie LM head weights to the embedding matrix (standard practice)
-        self.lm_head.weight = self.embed.weight
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.embed.weight
 
         self.rope = RotaryEmbedding(
             head_dim=config.hidden_size // config.num_heads,
@@ -112,6 +115,7 @@ class LoopLM(nn.Module):
         )
 
         self.gradient_checkpointing = False
+        self.collect_diagnostics = False
 
         if use_lecun_init:
             self._init_weights_lecun()
@@ -121,6 +125,8 @@ class LoopLM(nn.Module):
     def _init_weights(self) -> None:
         std = 0.02
         nn.init.normal_(self.embed.weight, mean=0.0, std=std)
+        if not self.config.tie_word_embeddings:
+            nn.init.normal_(self.lm_head.weight, mean=0.0, std=std)
         nn.init.zeros_(self.exit_gate.bias)
         nn.init.normal_(self.exit_gate.weight, mean=0.0, std=std)
         if self.use_q_act:
@@ -167,10 +173,11 @@ class LoopLM(nn.Module):
                 h = layer(h, cos, sin, attn_mask)
         return h
 
-    def _read_out(self, h: Tensor) -> tuple[Tensor, Tensor, Tensor | None]:
+    def _read_out(self, h: Tensor, normalized: bool = False) -> tuple[Tensor, Tensor, Tensor | None]:
         """Compute logits, exit lambda, and optionally Q-values from hidden state."""
-        logits = self.lm_head(self.final_norm(h))
-        lam = torch.sigmoid(self.exit_gate(h)).squeeze(-1)
+        logits = self.lm_head(h if normalized else self.final_norm(h))
+        gate_logits = self.exit_gate(h)
+        lam = torch.sigmoid(gate_logits.float() if self.config.fp32_gate else gate_logits).squeeze(-1)
         q_vals = self.q_head(h) if self.use_q_act else None
         return logits, lam, q_vals
 
@@ -199,6 +206,10 @@ class LoopLM(nn.Module):
         """
         if num_steps is None:
             num_steps = self.config.max_recurrent_steps
+        if num_steps < 1:
+            raise ValueError("num_steps must be positive")
+        if self.config.normalize_recurrent_state and (use_hl_split or self.use_moe_recurrence):
+            raise ValueError("The reproduction recurrence supports the standard shared block only")
 
         B, S = input_ids.shape
         cos, sin = self.rope.get_cos_sin(S, input_ids.device)
@@ -225,11 +236,21 @@ class LoopLM(nn.Module):
         exit_lambdas: list[Tensor] = []
         q_values: list[Tensor] = []
 
+        diagnostics = {key: [] for key in ("raw_state_rms", "state_rms", "residual_rms")}
         for _ in range(num_steps):
             if detach_between_steps:
                 h = h.detach()
+            previous = h.detach() if self.collect_diagnostics else None
             h = self._apply_layers(h, list(self.layers), cos, sin, attn_mask)
-            logits, lam, q_vals = self._read_out(h)
+            if self.collect_diagnostics:
+                with torch.no_grad():
+                    diagnostics["raw_state_rms"].append(h.float().square().mean().sqrt())
+                    diagnostics["residual_rms"].append((h.float() - previous.float()).square().mean().sqrt())
+            if self.config.normalize_recurrent_state:
+                h = self.final_norm(h)
+            if self.collect_diagnostics:
+                diagnostics["state_rms"].append(h.detach().float().square().mean().sqrt())
+            logits, lam, q_vals = self._read_out(h, normalized=self.config.normalize_recurrent_state)
             logits_per_step.append(logits)
             exit_lambdas.append(lam)
             if q_vals is not None:
@@ -239,6 +260,7 @@ class LoopLM(nn.Module):
             logits=logits_per_step,
             exit_lambdas=exit_lambdas,
             q_values=q_values if q_values else None,
+            diagnostics=diagnostics if self.collect_diagnostics else None,
         )
 
     def _forward_hl_split(

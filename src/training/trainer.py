@@ -14,6 +14,24 @@ from torch.utils.data import DataLoader
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
 from src.training.objectives import compute_adaptive_gate_loss, compute_looplm_loss, compute_q_act_loss
+from src.training.replay import capture_rng_state, restore_rng_state, seed_everything
+
+
+class TrainingDivergence(RuntimeError):
+    """A nonfinite numerical event; the reproduction runner records its context."""
+
+
+def _merge_diagnostics(total: dict, diagnostics: dict, weight: float) -> None:
+    for key, value in diagnostics.items():
+        if key.startswith("_") or key == "valid_tokens":
+            continue
+        if isinstance(value, list):
+            value = torch.stack([torch.as_tensor(item).detach() for item in value])
+        elif isinstance(value, (Tensor, float, int)):
+            value = torch.as_tensor(value).detach()
+        else:
+            continue
+        total[key] = total.get(key, 0) + value * weight
 
 
 @dataclass
@@ -66,6 +84,8 @@ class TrainerConfig:
     beta_kl: float = 0.1
     # None → use model_config.max_recurrent_steps
     num_recurrent_steps: int | None = None
+    seed: int | None = None
+    warmup_steps: int = 0
 
     # Multi-stage training: if non-empty, max_steps is overridden by sum of stage steps
     stages: list[StageConfig] = field(default_factory=list)
@@ -136,6 +156,12 @@ class Trainer:
         self.config = trainer_config
         self.device = _resolve_device(trainer_config.device)
         self.rank0 = _is_rank0()
+        if trainer_config.grad_accum_steps < 1 or trainer_config.warmup_steps < 0:
+            raise ValueError("Invalid accumulation or warmup steps")
+        if trainer_config.stages and trainer_config.warmup_steps:
+            raise ValueError("Explicit warmup currently supports single-stage training only")
+        if trainer_config.seed is not None:
+            seed_everything(trainer_config.seed)
 
         model_kwargs = model_kwargs or {}
         self.model = LoopLM(model_config, **model_kwargs).to(self.device)
@@ -153,6 +179,10 @@ class Trainer:
         )
         self.step = 0
         self._accum_count = 0
+        self._accum_diagnostics: dict = {}
+        self._accum_valid_tokens = 0.0
+        self.tokens_seen = 0
+        self.restored_data_state: dict | None = None
 
         # Multi-stage state
         self.stage_idx: int = 0
@@ -162,6 +192,8 @@ class Trainer:
         if trainer_config.stages:
             self.config.max_steps = sum(s.max_steps for s in trainer_config.stages)
             self._apply_stage(trainer_config.stages[0])
+        else:
+            self._update_lr()
 
         if trainer_config.use_wandb and self.rank0:
             import wandb
@@ -216,6 +248,9 @@ class Trainer:
     def _update_lr(self) -> None:
         """Update LR according to current stage schedule (no-op for constant)."""
         if self._stage_schedule is None:
+            factor = min(1.0, (self.step + 1) / max(1, self.config.warmup_steps))
+            for group in self.optimizer.param_groups:
+                group["lr"] = self.config.lr * factor
             return
         schedule, base_lr, total_steps = self._stage_schedule
         if schedule != "cosine":
@@ -277,21 +312,45 @@ class Trainer:
                     out.logits, out.exit_lambdas, targets, beta=self.config.beta_kl
                 )
 
+        if not torch.isfinite(loss).item():
+            raise TrainingDivergence(f"Nonfinite loss before optimizer update {self.step + 1}")
+        if out.diagnostics:
+            diag.update(out.diagnostics)
+        valid_tokens = float(diag.get("valid_tokens", targets.numel()))
+        _merge_diagnostics(self._accum_diagnostics, diag, valid_tokens)
+        self._accum_valid_tokens += valid_tokens
         scaled_loss = loss / self.config.grad_accum_steps
         scaled_loss.backward()
 
         self._accum_count += 1
         if self._accum_count >= self.config.grad_accum_steps:
-            grad_norm = nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.config.grad_clip
-            )
+            try:
+                grad_norm = nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.config.grad_clip, error_if_nonfinite=True
+                )
+            except RuntimeError as error:
+                if "non-finite" not in str(error).lower():
+                    raise
+                raise TrainingDivergence(f"Nonfinite gradients before optimizer update {self.step + 1}") from error
+            lr_used = self.optimizer.param_groups[0]["lr"]
             self.optimizer.step()
+            if not torch.stack([torch.isfinite(parameter).all() for parameter in self.model.parameters()]).all().item():
+                raise TrainingDivergence(f"Nonfinite parameters after optimizer update {self.step + 1}")
             self.optimizer.zero_grad()
+            diag = {key: value / max(1.0, self._accum_valid_tokens)
+                    for key, value in self._accum_diagnostics.items()}
+            diag["valid_tokens"] = self._accum_valid_tokens
+            self.tokens_seen += int(self._accum_valid_tokens) * (dist.get_world_size() if _is_distributed() else 1)
+            self._accum_diagnostics = {}
+            self._accum_valid_tokens = 0.0
             self._accum_count = 0
             self.step += 1
             self._update_lr()
             self._maybe_advance_stage()
             diag["grad_norm"] = grad_norm.detach()
+            diag["clipped"] = bool(grad_norm.item() > self.config.grad_clip)
+            diag["lr"] = lr_used
+            diag["tokens_seen"] = self.tokens_seen
             diag["_stepped"] = True
         else:
             diag["_stepped"] = False
@@ -306,6 +365,8 @@ class Trainer:
         while self.step < self.config.max_steps:
             batch = next(data_iter)
             diag = self.train_step(batch)
+            if not diag.get("_stepped", True):
+                continue
 
             if self.step % self.config.log_every == 0:
                 self._log(diag)
@@ -321,12 +382,15 @@ class Trainer:
 
     # ── Checkpointing ─────────────────────────────────────────────────────────
 
-    def save_checkpoint(self) -> Path:
+    def save_checkpoint(self, data_state: dict | None = None, filename: str | None = None) -> Path:
+        if self._accum_count:
+            raise ValueError("Save checkpoints only at optimizer update boundaries")
         if not self.rank0:
             return Path(self.config.checkpoint_dir) / f"step_{self.step:07d}.pt"
         ckpt_dir = Path(self.config.checkpoint_dir)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        path = ckpt_dir / f"step_{self.step:07d}.pt"
+        path = ckpt_dir / (filename or f"step_{self.step:07d}.pt")
+        temporary = path.with_suffix(".tmp")
         torch.save(
             {
                 "step": self.step,
@@ -336,17 +400,27 @@ class Trainer:
                 "trainer_config": dataclasses.asdict(self.config),
                 "stage_idx": self.stage_idx,
                 "stage_start_step": self._stage_start_step,
+                "rng_state": capture_rng_state(),
+                "data_state": data_state,
+                "tokens_seen": self.tokens_seen,
             },
-            path,
+            temporary,
         )
+        temporary.replace(path)
         return path
 
-    def load_checkpoint(self, path: str | Path) -> int:
+    def load_checkpoint(self, path: str | Path, lr_override: float | None = None) -> int:
         """Load checkpoint and return the step it was saved at."""
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.raw_model.load_state_dict(ckpt["model_state_dict"])
         self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         self.step = ckpt["step"]
+        self.tokens_seen = ckpt.get("tokens_seen", 0)
+        self.restored_data_state = ckpt.get("data_state")
+        self._accum_count = 0
+        self._accum_diagnostics = {}
+        self._accum_valid_tokens = 0.0
+        self.optimizer.zero_grad()
         self.stage_idx = ckpt.get("stage_idx", 0)
         self._stage_start_step = ckpt.get("stage_start_step", 0)
         if self.config.stages:
@@ -355,6 +429,13 @@ class Trainer:
                 self.config.stages[self.stage_idx],
                 steps_into_stage=steps_into_stage,
             )
+        if lr_override is not None:
+            if self.config.stages:
+                raise ValueError("LR override supports single-stage runs only")
+            self.config.lr = lr_override
+            self._update_lr()
+        if "rng_state" in ckpt:
+            restore_rng_state(ckpt["rng_state"])
         return self.step
 
     # ── Periodic evaluation ───────────────────────────────────────────────────
