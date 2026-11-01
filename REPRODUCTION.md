@@ -26,14 +26,40 @@ Do not resume a legacy checkpoint into `small_repro` and label it an unchanged r
 
 ## Prepare before reserving the GPU
 
+Save the cluster settings once, from the repository root:
+
+```bash
+if [ ! -f cluster.env ]; then cp cluster.env.example cluster.env; fi
+nano cluster.env  # or use your preferred editor
+```
+
+The defaults match your working cluster setup: partition `gpu-long`, one
+`gpu:h100-96:1`, 12 requested hours, 8 CPUs, and 96G of host RAM. The batch job
+sends END/FAIL notifications to `e1121685@u.nus.edu`. Twelve hours is the requested
+job duration, not an assertion about the partition's maximum time limit.
+Check `PILOT_STORAGE`; the interpreter, cache, data, and output paths derive
+from it and the repository location. `PILOT_ACCOUNT` is optional and empty by
+default: the wrapper omits `--account` and lets SLURM use the site's default.
+Set an account only if required for your allocation. If an older `cluster.env`
+still contains `YOUR_ACCOUNT` or `YOUR_H100_PARTITION`, replace the account with
+an empty value and the partition with `gpu-long`. For a site or
+Conda environment, set `PYTHON_BIN` to that environment's absolute Python path.
+Keep `cluster.env` on shared storage with the repository. It is ignored by Git
+so your local paths are not committed. The downloader, training launcher, and
+submission wrapper load it automatically on each invocation, including after
+reconnecting. Existing environment values and inline overrides take precedence
+over the example's saved defaults. Use `CLUSTER_ENV_FILE=/absolute/path/to/file`
+to select another file. You do not need to add project settings to `.bashrc`.
+
 The cluster does not need `uv`. Use Python 3.10–3.12 (3.11 is a reasonable
 starting choice), `venv`, and pip. Load your site's Python module first if
-required; module names are cluster-specific. Create the environment on a
-shared filesystem visible at the same path on the login and compute nodes:
+required; module names are cluster-specific. Reuse your existing `.venv` on a
+shared filesystem visible at the same path on the login and compute nodes.
+Create it only if this checkout does not already have one:
 
 ```bash
 cd /path/to/ouro-instability
-python3 -m venv .venv
+if [ ! -x .venv/bin/python ]; then python3 -m venv .venv; fi
 source .venv/bin/activate
 python -m pip install --upgrade pip
 
@@ -45,8 +71,7 @@ python -m pip freeze > .venv/requirements-resolved.txt
 python -m pytest tests/test_reproduction.py tests/test_corpus_preparation.py -q
 python scripts/verify_reproduction_tokenizer.py
 
-# Both shell wrappers use this exact interpreter, including in batch jobs.
-export PYTHON_BIN="$PWD/.venv/bin/python"
+# cluster.env defaults to this environment's absolute interpreter path.
 ```
 
 Select the PyTorch wheel using the cluster's instructions and the
@@ -64,6 +89,7 @@ with your results. Optional legacy wandb/evaluation paths additionally need
 Within a GPU allocation, check CUDA before starting the screen:
 
 ```bash
+source cluster.env  # only needed here for direct Python commands in this shell
 "$PYTHON_BIN" -c 'import torch; print(torch.__version__, torch.version.cuda); assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0)); assert torch.cuda.is_bf16_supported()'
 ```
 
@@ -97,7 +123,7 @@ The primary corpus is a fixed selection from FineWeb-Edu `sample-10BT` at revisi
 `87f09149ef4734204d70ed1d046ddc9ca3f2b8f9`. On a node with download access:
 
 ```bash
-"$PYTHON_BIN" scripts/prepare_reproduction_data.py --output-dir data/reproduction_fineweb_edu
+bash scripts/download_artifacts.sh
 ```
 
 FineWeb-Edu has a training split; the preparation command constructs our own
@@ -142,8 +168,8 @@ documented experimental change; equal vocabulary size is insufficient.
 For an optional **pipeline smoke test only**, use the official raw WikiText rows:
 
 ```bash
-"$PYTHON_BIN" scripts/prepare_reproduction_data.py \
-  --dataset Salesforce/wikitext --output-dir data/smoke_wikitext_raw
+REPRO_DATA_DIR="$PWD/data/smoke_wikitext_raw" \
+  bash scripts/download_artifacts.sh --dataset Salesforce/wikitext
 ```
 
 This selects `wikitext-103-raw-v1` at the pinned source revision and defaults to
@@ -186,33 +212,34 @@ loops at learning rates 1e-4 and 3e-4, seed 0, for 512 updates with a 200-update
 warmup. Neither depth is truncated or automatically reduced after a spike.
 
 ```bash
-export TRAIN_DATA_DIR="$PWD/data/reproduction_fineweb_edu/train"
-export VAL_DATA_DIR="$PWD/data/reproduction_fineweb_edu/validation"
 MODE=screen bash scripts/reproduce.sh
 ```
 
-Or submit `scripts/reproduce.sh` with `sbatch`, overriding account, partition, and
-wall time as required by the cluster. Its 72-hour header is a requested limit,
-not a claim that the cluster supports three-day jobs. Set `REPO_DIR` if the job
-does not start in this checkout, and `OUTPUT_ROOT` to persistent scratch storage.
-Complete pip installation and data preparation before going offline. For
-example, from the repository on the login node after setting the data paths:
+For submission from the login node, use the wrapper to read the optional account,
+partition, interpreter, and data paths without repeating exports:
 
 ```bash
-export REPO_DIR="$PWD"
-export PYTHON_BIN="$PWD/.venv/bin/python"
-export MODE=screen
-sbatch --export=ALL --account=YOUR_ACCOUNT --partition=YOUR_GPU_PARTITION scripts/reproduce.sh
+MODE=screen bash scripts/submit_reproduction.sh
 ```
 
-Replace the account and partition with your cluster's values, and override
-`--time` if needed. SLURM receives the absolute interpreter path through
-`PYTHON_BIN`, so it does not depend on interactive shell activation. For an
-existing Conda environment, set `PYTHON_BIN="$(command -v python)"` after
-activation. Both shell wrappers default to `python3` on `PATH` if `PYTHON_BIN`
-is unset. Load any required site modules in the batch script as well if the
-cluster needs that. The launcher installs nothing, requests one GPU, and writes
-local logs.
+The wrapper forwards additional `sbatch` options and exports the resolved
+settings to the job. It sets the working directory to the repository and creates
+`logs/` before calling `sbatch`, because SLURM opens its log files before running
+the script. Standard output goes to `logs/ouro_reproduce_JOBID.out` and errors
+to `logs/ouro_reproduce_JOBID.err`. It does not depend on SLURM's temporary script
+location. Override resources when needed, for example
+`bash scripts/submit_reproduction.sh --time=06:00:00`; GPU, memory, partition,
+account, and notification overrides can also be passed as `sbatch` options.
+Without overrides, it requests the cluster settings above. Resubmit the same
+experiment command to continue from the latest rolling checkpoint if a job
+does not finish its horizon in one allocation. The absolute `PYTHON_BIN` does
+not depend on interactive shell activation. Put any site-required module-load commands in
+`cluster.env` so they run during submission and inside the batch job. The
+launcher installs nothing, requests one GPU, and writes local logs. Complete
+pip installation and data preparation before going offline.
+
+The earlier environment-only commands still work if no `cluster.env` is
+present. The wrappers default to `python3` on `PATH` if `PYTHON_BIN` is unset.
 
 For compute nodes without internet, stage the data, interpreter and installed
 packages on shared storage first. If the preparation node also lacks internet,
@@ -239,9 +266,9 @@ matched depth pair with independent seeds; target 3,072 updates, 50,331,648 targ
 tokens per run. Start with one seed if profiling indicates a tight allocation:
 
 ```bash
-MODE=reproduce LRS=3e-4 SEEDS=101 bash scripts/reproduce.sh
+MODE=reproduce LRS=3e-4 SEEDS=101 bash scripts/submit_reproduction.sh
 # After reviewing costs and the first pair:
-MODE=reproduce LRS=3e-4 SEEDS="202 303" bash scripts/reproduce.sh
+MODE=reproduce LRS=3e-4 SEEDS="202 303" bash scripts/submit_reproduction.sh
 ```
 
 The learning rate above is an example selection, not a pre-established best value.

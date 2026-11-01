@@ -1,16 +1,22 @@
-#!/usr/bin/env bash
-# Submit with sbatch (adjust account/partition/time on the command line), or run
+#!/bin/bash
+# Submit through submit_reproduction.sh (adjust resources on the command line), or run
 # inside an existing single-GPU allocation. One process runs all cells serially.
+#SBATCH --job-name=ouro_reproduce
+#SBATCH --partition=gpu-long
+#SBATCH --time=72:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=72:00:00
-#SBATCH --job-name=ouro_reproduce
-#SBATCH --output=ouro_reproduce_%j.out
+#SBATCH --mem=96G
+#SBATCH --gres=gpu:h100-96:1
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=e1121685@u.nus.edu
 
 set -euo pipefail
-cd "${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+cd "${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
+source scripts/load_cluster_env.sh
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "Python executable not found: $PYTHON_BIN. Set PYTHON_BIN to your environment's bin/python." >&2

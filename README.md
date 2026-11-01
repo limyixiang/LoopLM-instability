@@ -21,11 +21,12 @@ the separate reference checker, and offline cluster setup.
 ```bash
 git clone <repo>
 cd looplm
-python3 -m venv .venv
+if [ ! -x .venv/bin/python ]; then python3 -m venv .venv; fi
 source .venv/bin/activate
 # Install a CUDA-enabled PyTorch build appropriate for your cluster first.
 python -m pip install -r requirements-reproduction.txt
-export PYTHON_BIN="$PWD/.venv/bin/python"
+if [ ! -f cluster.env ]; then cp cluster.env.example cluster.env; fi
+# Check storage/Python paths; gpu-long is preset and an account is optional.
 ```
 
 ## Instability reproduction pilot
@@ -90,32 +91,34 @@ python scripts/train.py \
   python scripts/analyze.py mano-collect --input-dir ${SCRATCH}/looplm/mano
   ```
 
-### JUWELS (westai / H100)
+### SLURM / H100
 
 **One-time setup on login node** (needs internet):
 
 ```bash
 source .venv/bin/activate
-export PYTHON_BIN="$PWD/.venv/bin/python"
 bash scripts/download_artifacts.sh   # prepares the bounded pinned FineWeb-Edu pilot
 ```
 
 **Submit job:**
 
 ```bash
-# Supply the prepared directories and your account/partition:
-export REPO_DIR="$PWD"
-export PYTHON_BIN="$PWD/.venv/bin/python"
-export TRAIN_DATA_DIR="${SCRATCH}/looplm/data/reproduction_fineweb_edu/train"
-export VAL_DATA_DIR="${SCRATCH}/looplm/data/reproduction_fineweb_edu/validation"
-sbatch --export=ALL --account=YOUR_ACCOUNT --partition=YOUR_GPU_PARTITION scripts/reproduce.sh
+# Reads saved cluster.env settings, including after reconnecting:
+MODE=screen bash scripts/submit_reproduction.sh
 ```
+
+Defaults match the supplied cluster header: partition `gpu-long`, one
+`gpu:h100-96:1`, 12 requested hours, 8 CPUs, and 96G host RAM, with END/FAIL
+email notifications. `PILOT_ACCOUNT` may be empty; an explicit account is passed
+only when configured. Additional `sbatch` options remain available, for example
+`bash scripts/submit_reproduction.sh --time=06:00:00`.
 
 **Monitor:**
 
 ```bash
 squeue --me
-tail -f ouro_reproduce_<job-id>.out
+tail -f logs/ouro_reproduce_12345.out  # replace 12345 with your job ID
+tail -f logs/ouro_reproduce_12345.err
 ```
 
 The reproduction harness writes local JSONL metrics and checkpoints; see
@@ -123,6 +126,15 @@ The reproduction harness writes local JSONL metrics and checkpoints; see
 installed dependencies before using an offline compute node. The legacy
 `scripts/train.slurm` supports offline wandb logging for legacy runs.
 It also accepts `PYTHON_BIN`; install `wandb` in that environment if using it.
+The reproduction wrappers load `cluster.env` automatically; see
+[cluster.env.example](cluster.env.example). Existing environment-only usage is
+still supported. Keep site-specific Python/CUDA module commands in the saved
+configuration if needed on compute nodes.
+The submission wrapper creates `logs/` before calling `sbatch`, so SLURM can
+open its output/error files before the job script starts. Reuse your existing
+`.venv` through `PYTHON_BIN`; no `uv` installation is needed. For an older
+`cluster.env` template, clear any `YOUR_ACCOUNT` value and set the partition to
+`gpu-long` before submitting.
 
 ## Running Tests
 

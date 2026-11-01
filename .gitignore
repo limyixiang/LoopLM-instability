@@ -63,4 +63,5 @@ Thumbs.db
 
 # Secrets
 .env
+cluster.env
 *.key

@@ -4,6 +4,7 @@
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source scripts/load_cluster_env.sh
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "Python executable not found: $PYTHON_BIN. Set PYTHON_BIN to your environment's bin/python." >&2
