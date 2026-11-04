@@ -45,6 +45,11 @@ The pilot retains the original joint objective and full recurrent backpropagatio
 Detached-gate and uniform-supervision interventions remain future work, conditional
 on reproducing a meaningful instability.
 
+To review completed screening curves in TensorBoard, install the optional
+`tensorboard` package and use `scripts/export_tensorboard.py` on the existing
+JSONL logs. See [the review instructions](REPRODUCTION.md#review-completed-runs-in-tensorboard).
+No training rerun is needed; resumed attempts remain separate curves.
+
 The primary corpus is a fixed, pinned FineWeb-Edu subset with content-hash-based
 document splits. Preparation defaults to the pinned released Ouro tokenizer;
 SmolLM2 has different special-token mappings despite the same vocabulary size.

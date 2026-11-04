@@ -325,6 +325,75 @@ Flags are reported separately. Finite spikes and gate collapse do not automatica
 terminate training. These thresholds are descriptive definitions, not a trained
 predictor or a proof of mechanism.
 
+## Review completed runs in TensorBoard
+
+The reproduction trainer writes JSONL metrics. Convert those existing logs to
+TensorBoard event files with the optional exporter; training does not need to be
+rerun. Install the viewer dependency in the existing environment and export:
+
+```bash
+source cluster.env
+"$PYTHON_BIN" -m pip install tensorboard
+"$PYTHON_BIN" scripts/export_tensorboard.py \
+  --input-dir "$OUTPUT_ROOT/screen" \
+  --output-dir "$OUTPUT_ROOT/tensorboard/screen"
+"$PYTHON_BIN" -m tensorboard.main \
+  --logdir "$OUTPUT_ROOT/tensorboard/screen" --host 127.0.0.1 --port 6006
+```
+
+Run the viewer on a host allowed by your cluster's service policy, for example
+the login host if permitted. When it runs on the login host, use another terminal
+on your own computer for the SSH tunnel, using your normal cluster login:
+
+```bash
+ssh -N -L 6006:127.0.0.1:6006 USER@CLUSTER_LOGIN
+```
+
+Open `http://localhost:6006` on your computer. Alternatively, copy the exported
+event directory to your own computer and run TensorBoard there. Neither export
+nor viewing uses a GPU or loads model checkpoints. The exporter uses PyTorch's
+[SummaryWriter](https://docs.pytorch.org/docs/2.10/tensorboard.html).
+
+Select the four screening runs and use the **Step** axis, which represents
+optimizer updates. Start with smoothing at zero so recoverable spikes remain
+visible. Useful charts are:
+
+| TensorBoard tag | Review question |
+| --- | --- |
+| `train/uniform_ce` | Does prediction loss generally decrease? Are there abrupt excursions? |
+| `validation/uniform_ce` | Does the fixed development probe improve or deteriorate persistently? |
+| `endpoint_validation/per_step_losses/exit_4` | How does the common fourth exit compare across trained four/eight-loop models? |
+| `endpoint_validation/per_step_losses/exit_8` | In an eight-loop model, is its final exit useful relative to its fourth exit? |
+| `train/grad_norm`, `train/clipped` | Do loss excursions coincide with gradient excursions? Clipping alone is not failure. |
+| `train/exit_probs/exit_1`, `train/normalized_entropy` | Is the gate concentrating on the first exit? |
+| `train/raw_state_rms/loop_8` | Are raw recurrent states growing abruptly in the eight-loop run? |
+| `train/events/loss_spike`, `validation/events/persistent_collapse` | Where did the predefined flags fire? |
+| `train/end_to_end_tokens_per_second`, `train/peak_memory_gib` | What are the observed runtime and memory costs? |
+
+Routine probes and endpoint validation have separate tag prefixes because they
+use different token budgets. Compare like evaluations. Total `train/loss`
+includes exit weighting and entropy, so use prediction CE and per-exit CE to
+judge learning quality. Better deeper-exit prediction alone is not evidence of
+training instability or a reasoning improvement.
+
+Each resumed attempt gets its own TensorBoard run, named with `attempt_ID`, so
+rolled-back or repeated steps are never joined into one curve. `export.json`
+records the source hashes, attempt IDs, step ranges, and which attempt matches
+each run's final `result.json`. Use that result and the resume metadata to follow
+the chosen lineage. These attempt curves are not independent training seeds.
+Nonfinite metric values are omitted from numeric curves and explicitly flagged
+in the export report and `export/nonfinite_metric` chart.
+
+The export leaves JSONL, checkpoints, and result metadata unchanged. It refuses
+to append into a nonempty export directory to avoid duplicate points. Choose a
+new output directory when exporting again, such as `screen_review_2`, and point
+TensorBoard at that export. This is a snapshot exporter, not live training
+logging. Event-file wall time reflects conversion time; use **Step** for the
+curves and the recorded throughput/elapsed metrics for runtime. Keep the raw
+JSONL as the source of record. TensorBoard is the visual review tool; predefined
+event flags and independent-seed reproduction still determine the research
+interpretation.
+
 ## Replay and final evaluation
 
 Use the same arguments and add `--resume-from path/to/step_0000100.pt` for exact
