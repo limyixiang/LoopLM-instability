@@ -96,7 +96,8 @@ def paired_estimates(cases):
         for target in (50331648, 100663296):
             hours = 0.0
             training_hours = 0.0
-            for profile in depths.values():
+            per_depth_hours = {}
+            for depth, profile in depths.items():
                 training = target / profile["steady_tokens_per_second"]
                 validation = next(item for item in profile["operations"] if item["kind"] == "endpoint_validation")
                 checkpoint = next(item for item in profile["operations"] if item["kind"] == "checkpoint")
@@ -107,10 +108,13 @@ def paired_estimates(cases):
                 checkpoint_seconds = (updates // 100 + 2) * checkpoint["seconds"]
                 training_hours += training / 3600
                 hours += (training + val_seconds + checkpoint_seconds) / 3600
+                per_depth_hours[str(depth)] = (training + val_seconds + checkpoint_seconds) / 3600
             estimates.append({"sequence_length": seq, "microbatch": micro, "target_tokens_per_run": target,
                               "pair_training_only_hours": training_hours,
                               "pair_hours_with_scaled_validation_and_checkpoint_cost": hours,
                               "two_seed_pairs_hours_before_replays_and_setup": 2 * hours,
+                              "per_depth_hours_with_scaled_overhead": per_depth_hours,
+                              "pair_elapsed_hours_if_started_together_on_two_gpus": max(per_depth_hours.values()),
                               "scope": "Projection, not measured long-run duration; excludes setup, logging/sampling overhead, contention and replay"})
     return estimates
 

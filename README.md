@@ -46,6 +46,20 @@ needed. Follow [the ordered profile steps](REPRODUCTION.md#profile-ouro-14b-size
 before selecting a longer large-model run. The legacy presets and small-run
 paths remain available for old checkpoints.
 
+Two `h100-47` allocations can run independent cells concurrently using
+`scripts/submit_array.sh profile|reproduce`. Arrays are capped at two tasks,
+freeze the task mapping at submission, and preserve training resume paths.
+The next profile matrix is:
+
+```bash
+PROFILE_CASES="512:2 512:4" PROFILE_DEPTHS="4 8" bash scripts/submit_array.sh profile --dry-run
+# Review the mapping, then repeat without --dry-run to submit.
+```
+
+See [array instructions](REPRODUCTION.md#run-arrays-on-two-47-gb-allocations) for
+collection, training, extensions, and the distinction between elapsed time and
+aggregate GPU-hours. The reported 72-hour limit is per request.
+
 Use `scripts/train.py --reproduction` for the controlled pilot. Its `small_repro`
 preset has approximately 118M parameters, untied embeddings, and the released
 Ouro loop-boundary normalization. The existing `small` preset retains the legacy
