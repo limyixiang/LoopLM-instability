@@ -34,7 +34,8 @@ def parse_args():
 
     # Model
     p.add_argument("--model-config", default=None,
-                   choices=["small", "small_repro", "ouro_1_4b", "ouro_2_6b"])
+                   choices=["small", "small_repro", "ouro_1_4b", "ouro_2_6b",
+                            "ouro_1_4b_repro", "depth24_repro"])
     # Model config overrides (applied after loading preset)
     p.add_argument("--hidden-size", type=int, default=None)
     p.add_argument("--num-layers", type=int, default=None)
@@ -81,6 +82,10 @@ def parse_args():
                    help="Explicitly override peak LR after restoring optimizer state")
     p.add_argument("--reproduction", action="store_true",
                    help="Joint-objective single-GPU pilot with replay, JSONL, and held-out CE")
+    p.add_argument("--profile-warmup-updates", type=int, default=None,
+                   help="Performance profile: exclude this many complete updates from steady timing; no resume")
+    p.add_argument("--repack-stream", action="store_true",
+                   help="Explicitly reblock verified 1-D prepared token streams at --seq-len; preserve splits/hashes")
     p.add_argument("--val-data-dir", default=None)
     p.add_argument("--val-every", type=int, default=100)
     p.add_argument("--val-tokens", type=int, default=131072)
@@ -117,6 +122,8 @@ def parse_args():
                    help="Max examples per task during periodic eval (default: full).")
 
     args = p.parse_args()
+    if (args.profile_warmup_updates is not None or args.repack_stream) and not args.reproduction:
+        p.error("Profiling and stream repacking require --reproduction")
     args.model_config = args.model_config or ("small_repro" if args.reproduction else "small")
     from src.training.corpus import OURO_TOKENIZER, OURO_TOKENIZER_REVISION
     args.tokenizer_id = args.tokenizer_id or (OURO_TOKENIZER if args.reproduction else "HuggingFaceTB/SmolLM2-135M")
@@ -133,6 +140,8 @@ def build_model_config(args) -> LoopLMConfig:
         "small_repro": LoopLMConfig.small_repro(),
         "ouro_1_4b": LoopLMConfig.ouro_1_4b(),
         "ouro_2_6b": LoopLMConfig.ouro_2_6b(),
+        "ouro_1_4b_repro": LoopLMConfig.ouro_1_4b_repro(),
+        "depth24_repro": LoopLMConfig.depth24_repro(),
     }
     cfg = configs[args.model_config]
     cfg.max_seq_len = args.seq_len

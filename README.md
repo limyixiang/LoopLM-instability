@@ -35,6 +35,17 @@ The reproduction harness is implemented; no H100 instability results have been
 established by this patch. See [REPRODUCTION.md](REPRODUCTION.md) for preparation,
 screening, matched four/eight-loop runs, replay, and output interpretation.
 
+The next selected experiment is a bounded **Ouro-1.4B-size T8 performance profile**,
+using the new `ouro_1_4b_repro` preset (24 layers, width 2,048, FFN 5,632,
+1,434,652,673 parameters). Start with `bash scripts/submit_profile.sh` after
+checking its plan with `bash scripts/profile_reproduction.sh --dry-run`.
+This measures real optimizer updates, allocated/reserved/device/process memory,
+validation, and checkpoint costs in separate fresh output directories. It reuses
+the prepared corpus and existing pip environment; no model weights or `uv` are
+needed. Follow [the ordered profile steps](REPRODUCTION.md#profile-ouro-14b-size-training-next)
+before selecting a longer large-model run. The legacy presets and small-run
+paths remain available for old checkpoints.
+
 Use `scripts/train.py --reproduction` for the controlled pilot. Its `small_repro`
 preset has approximately 118M parameters, untied embeddings, and the released
 Ouro loop-boundary normalization. The existing `small` preset retains the legacy

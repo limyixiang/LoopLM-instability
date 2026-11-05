@@ -6,6 +6,7 @@ code is loaded through Transformers' explicit trust_remote_code mechanism.
 """
 
 import argparse
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", default=".uv/ouro-reference")
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--loops", type=int, choices=[4, 8], default=4)
     args = parser.parse_args()
     cache = Path(args.cache_dir).resolve()
     os.environ["HF_MODULES_CACHE"] = str(cache / "modules")
@@ -42,21 +44,42 @@ def main():
                                cache_dir=str(cache / "downloads"), local_files_only=args.offline)
         (source / name).write_bytes(Path(path).read_bytes())
     config_values = json.loads((source / "config.json").read_text())
+    released_settings = {key: config_values[key] for key in (
+        "hidden_size", "intermediate_size", "num_hidden_layers", "num_attention_heads",
+        "num_key_value_heads", "vocab_size", "tie_word_embeddings", "initializer_range",
+        "rms_norm_eps", "max_position_embeddings", "rope_theta")}
+    production = LoopLMConfig.ouro_1_4b_repro()
+    for key, expected in {"hidden_size": production.hidden_size,
+                          "intermediate_size": production.intermediate_size,
+                          "num_hidden_layers": production.num_layers,
+                          "num_attention_heads": production.num_heads,
+                          "num_key_value_heads": production.num_heads,
+                          "vocab_size": production.vocab_size,
+                          "tie_word_embeddings": False, "initializer_range": 0.02,
+                          "rms_norm_eps": 1e-6}.items():
+        assert config_values[key] == expected, (key, config_values[key], expected)
     config_values.update(vocab_size=64, hidden_size=32, intermediate_size=64,
                          num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
-                         head_dim=8, max_position_embeddings=16, total_ut_steps=4,
+                         head_dim=8, max_position_embeddings=16, total_ut_steps=args.loops,
                          rope_theta=10000.0, layer_types=["full_attention"] * 2,
                          use_cache=False, tie_word_embeddings=False)
     (source / "config.json").write_text(json.dumps(config_values), encoding="utf-8")
     config = AutoConfig.from_pretrained(source, trust_remote_code=True)
     config._attn_implementation = "sdpa"
     reference = AutoModelForCausalLM.from_config(config, trust_remote_code=True).float().eval()
-    local_config = LoopLMConfig(vocab_size=64, hidden_size=32, intermediate_size=64,
-                               num_layers=2, num_heads=4, max_seq_len=16,
-                               max_recurrent_steps=4, tie_word_embeddings=False,
-                               normalize_recurrent_state=True, fp32_gate=True)
+    local_config = replace(production, vocab_size=64, hidden_size=32, intermediate_size=64,
+                           num_layers=2, num_heads=4, max_seq_len=16,
+                           max_recurrent_steps=args.loops)
     torch.manual_seed(101)
     local = LoopLM(local_config).eval()
+    # Verify norms and biases before copying weights; random draws need not match
+    # across different module-construction orders. Both policies use N(0, .02).
+    for model in (reference, local):
+        for name, parameter in model.named_parameters():
+            if "norm" in name:
+                torch.testing.assert_close(parameter, torch.ones_like(parameter), atol=0, rtol=0)
+            if name.endswith("bias"):
+                torch.testing.assert_close(parameter, torch.zeros_like(parameter), atol=0, rtol=0)
     mapping = {"embed.weight": "model.embed_tokens.weight", "lm_head.weight": "lm_head.weight",
                "final_norm.weight": "model.norm.weight", "exit_gate.weight": "model.early_exit_gate.weight",
                "exit_gate.bias": "model.early_exit_gate.bias"}
@@ -93,10 +116,14 @@ def main():
         expected = reference_parameters[mapping[name]].grad
         torch.testing.assert_close(parameter.grad, expected, atol=2e-5, rtol=2e-3)
         maximum_gradient_error = max(maximum_gradient_error, (parameter.grad - expected).abs().max().item())
-    report = {"reference": OURO_REFERENCE, "precision": "FP32", "loops": 4,
+    report = {"reference": OURO_REFERENCE, "precision": "FP32", "loops": args.loops,
+              "released_settings": released_settings,
+              "profile_preset_parameters": production.num_parameters(),
+              "profile_rope_base": production.rope_base,
+              "initialization_policy": "Normal(0, 0.02) matrix weights; unit norm scales; zero gate bias",
               "max_forward_absolute_error": maximum_forward_error,
               "max_gradient_absolute_error": maximum_gradient_error,
-              "scope": "Tiny copied-weight forward/gradient agreement; no H100 training or instability result"}
+              "scope": "Full preset shape/config audit plus tiny copied-weight forward/gradient agreement; not full-size numerical or H100 verification"}
     (cache / "verification.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
 

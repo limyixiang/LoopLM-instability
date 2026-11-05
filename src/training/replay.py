@@ -41,7 +41,7 @@ class TokenCorpus:
     File hashes make replay reject changed data even when paths stay identical.
     """
 
-    def __init__(self, directory: str | Path, seq_len: int):
+    def __init__(self, directory: str | Path, seq_len: int, *, repack_stream: bool = False):
         self.seq_len = seq_len
         self.paths = sorted(Path(directory).glob("*.npy"))
         if not self.paths:
@@ -82,8 +82,10 @@ class TokenCorpus:
             if manifest.get("version") == 2:
                 if manifest.get("status") != "complete":
                     raise ValueError("Prepared corpus has incomplete token targets")
-                if manifest["packing"]["sequence_length"] != seq_len:
-                    raise ValueError("Prepared corpus sequence length differs from the requested packing")
+                changed_packing = manifest["packing"]["sequence_length"] != seq_len
+                if changed_packing and not (repack_stream and all(array.ndim == 1 for array in self.arrays)):
+                    raise ValueError("Prepared corpus sequence length differs from the requested packing; "
+                                     "explicit --repack-stream requires 1-D streams")
                 split = Path(directory).name
                 expected = manifest["splits"][split]
                 if [(s["name"], s["sha256"]) for s in expected["shards"]] != [(s["name"], s["sha256"]) for s in self.manifest]:
@@ -101,6 +103,12 @@ class TokenCorpus:
                                     "split": split, "records_sha256": expected["records_sha256"],
                                     "prepared_tokens": expected["tokens"],
                                     "target_positions": expected["target_positions"]}
+                if changed_packing:
+                    self.preparation["runtime_packing"] = {
+                        "sequence_length": seq_len, "explicit_repack_stream": True,
+                        "chunks": total, "target_positions": total * seq_len,
+                        "unused_tokens": sum(item["unused_tokens"] for item in self.manifest),
+                        "scope": "Same verified source streams and document splits; changed sequence boundaries"}
 
     def __len__(self) -> int:
         return self.ends[-1]

@@ -59,6 +59,28 @@ class LoopLMConfig:
         )
 
     @classmethod
+    def ouro_1_4b_repro(cls) -> "LoopLMConfig":
+        """Released 1.4B tensor shapes, with Stage-1 context/RoPE settings.
+
+        Random initialization, not a loader for the released trained weights.
+        Keep the legacy ouro_1_4b preset unchanged for existing checkpoints.
+        """
+        return cls(hidden_size=2048, num_layers=24, num_heads=16,
+                   intermediate_size=5632, max_seq_len=4096,
+                   max_recurrent_steps=8, rope_base=10000.0,
+                   tie_word_embeddings=False, normalize_recurrent_state=True,
+                   fp32_gate=True)
+
+    @classmethod
+    def depth24_repro(cls) -> "LoopLMConfig":
+        """~245M fallback: 24 shared layers with the validated pilot width."""
+        config = cls.small_repro()
+        config.num_layers = 24
+        config.max_seq_len = 4096
+        config.max_recurrent_steps = 8
+        return config
+
+    @classmethod
     def ouro_1_4b(cls) -> "LoopLMConfig":
         """1.4B parameter config (Table 2)."""
         return cls(

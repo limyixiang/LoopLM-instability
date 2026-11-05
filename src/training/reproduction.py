@@ -145,6 +145,10 @@ def _git_info() -> dict:
 
 
 def run_reproduction(args, model_config) -> int:
+    from src.training.profiling import ReproductionProfile
+    profile_warmup = getattr(args, "profile_warmup_updates", None)
+    if profile_warmup is not None and (args.resume_from or not 1 <= profile_warmup < args.max_steps):
+        raise ValueError("Profile requires fresh initialization, positive warmup updates, and steady updates")
     if "RANK" in os.environ or any((args.stage1a_steps, args.stage1b_steps, args.stage2_steps, args.use_q_act)):
         raise ValueError("Reproduction uses one GPU, one fixed depth, and the joint objective only")
     if not args.data_dir or not args.val_data_dir:
@@ -167,9 +171,10 @@ def run_reproduction(args, model_config) -> int:
                            device=args.device, use_amp=not args.no_amp,
                            checkpoint_dir=str(output / "checkpoints"),
                            log_every=args.log_every, save_every=args.save_every)
-    corpus = TokenCorpus(args.data_dir, args.seq_len)
-    validation = TokenCorpus(args.val_data_dir, args.seq_len)
-    test = TokenCorpus(args.test_data_dir, args.seq_len) if args.test_data_dir else None
+    repack = getattr(args, "repack_stream", False)
+    corpus = TokenCorpus(args.data_dir, args.seq_len, repack_stream=repack)
+    validation = TokenCorpus(args.val_data_dir, args.seq_len, repack_stream=repack)
+    test = TokenCorpus(args.test_data_dir, args.seq_len, repack_stream=repack) if args.test_data_dir else None
     if set(item["sha256"] for item in corpus.manifest) & set(item["sha256"] for item in validation.manifest):
         raise ValueError("Training and validation contain identical token shards")
     if test is not None and set(item["sha256"] for item in test.manifest) & set(
@@ -195,6 +200,10 @@ def run_reproduction(args, model_config) -> int:
     protocol = {"val_every": args.val_every, "val_tokens": args.val_tokens,
                 "deterministic": args.deterministic,
                 "gradient_checkpointing": args.gradient_checkpointing}
+    if repack:
+        protocol["repack_stream"] = True
+    if profile_warmup is not None:
+        protocol["purpose"] = "performance_profile_not_instability_replication"
     metadata = {"attempt_id": attempt_id, "objective": "joint", "reference": OURO_REFERENCE,
                 "model": dataclasses.asdict(model_config), "trainer": dataclasses.asdict(config),
                 "arguments": vars(args), "parameters": sum(p.numel() for p in trainer.raw_model.parameters()),
@@ -231,6 +240,13 @@ def run_reproduction(args, model_config) -> int:
         write_json(output / "run.json", metadata)
     if trainer.step > args.max_steps:
         raise ValueError("Training horizon precedes the resumed checkpoint")
+    profile = ReproductionProfile(output, trainer.device, profile_warmup) if profile_warmup is not None else None
+
+    def measured(name, function):
+        return profile.measure(name, function) if profile else function()
+
+    def evaluate(name, tokens):
+        return measured(name, lambda: evaluate_corpus(trainer, validation, args.batch_size, tokens))
 
     def data_state():
         return {"stream": stream.state_dict(), "monitor": monitor.state_dict(),
@@ -238,13 +254,16 @@ def run_reproduction(args, model_config) -> int:
                 "preparation_fingerprints": preparation_fingerprints}
 
     def checkpoint(initial=False):
-        path = trainer.save_checkpoint(data_state(), filename="initial.pt" if initial else None)
+        path = measured("initial_checkpoint" if initial else "checkpoint",
+                        lambda: trainer.save_checkpoint(data_state(), filename="initial.pt" if initial else None))
         paths = sorted(path.parent.glob("step_*.pt"))
         for old in paths[:-args.keep_checkpoints]:
             old.unlink()
         return path
 
-    initial = checkpoint(initial=True) if not args.resume_from else Path(args.resume_from)
+    # The bounded profile writes one optimizer-populated checkpoint at the end.
+    # Until then there is no replay parent; normal reproduction retention is unchanged.
+    initial = (None if profile else checkpoint(initial=True)) if not args.resume_from else Path(args.resume_from)
     last_healthy = initial
     started, trained_seconds = time.perf_counter(), 0.0
     starting_tokens = trainer.tokens_seen
@@ -255,7 +274,7 @@ def run_reproduction(args, model_config) -> int:
     def log(row):
         row["attempt_id"] = attempt_id
         # Retain parents of early recoverable events even after rolling pruning.
-        if row.get("events"):
+        if row.get("events") and last_healthy is not None:
             directory = output / "events"
             directory.mkdir(exist_ok=True)
             if len(list(directory.glob("*.pt"))) < args.keep_event_checkpoints:
@@ -272,11 +291,13 @@ def run_reproduction(args, model_config) -> int:
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        probe = evaluate_corpus(trainer, validation, args.batch_size, args.val_tokens)
+        probe = evaluate("initial_validation", args.val_tokens)
         # On resume, do not count an extra evaluation toward the collapse threshold.
         events = [] if args.resume_from else monitor.validation_events(probe["uniform_ce"])
         log({"kind": "validation", "step": trainer.step, **probe, "events": events})
         while trainer.step < args.max_steps:
+            if profile and not trainer._accum_count:
+                profile.begin()
             before_stream = stream.state_dict()
             batch = next(stream)
             if batch.min().item() < 0 or batch.max().item() >= model_config.vocab_size:
@@ -289,6 +310,8 @@ def run_reproduction(args, model_config) -> int:
             trained_seconds += time.perf_counter() - tick
             if not diagnostics.get("_stepped", True):
                 continue
+            if profile:
+                profile.end_update(trainer, diagnostics)
             row = {"kind": "train", "step": trainer.step, **json_value(diagnostics),
                    "elapsed_seconds": time.perf_counter() - started,
                    "training_seconds": trained_seconds, "batch_indices": stream.last_indices,
@@ -298,16 +321,17 @@ def run_reproduction(args, model_config) -> int:
             row["end_to_end_tokens_per_second"] = (trainer.tokens_seen - starting_tokens) / max(row["elapsed_seconds"], 1e-9)
             if trainer.device.type == "cuda":
                 row["peak_memory_bytes"] = torch.cuda.max_memory_allocated(trainer.device)
+                row["peak_reserved_memory_bytes"] = torch.cuda.max_memory_reserved(trainer.device)
             log(row)
             if trainer.step % args.log_every == 0:
                 trainer._log(diagnostics)
             if trainer.step % args.val_every == 0:
-                probe = evaluate_corpus(trainer, validation, args.batch_size, args.val_tokens)
+                probe = evaluate("probe_validation", args.val_tokens)
                 log({"kind": "validation", "step": trainer.step, **probe,
                      "events": monitor.validation_events(probe["uniform_ce"])})
             if trainer.step % args.save_every == 0:
                 last_healthy = checkpoint()
-        probe = evaluate_corpus(trainer, validation, args.batch_size, args.endpoint_val_tokens)
+        probe = evaluate("endpoint_validation", args.endpoint_val_tokens)
         log({"kind": "endpoint_validation", "step": trainer.step, **probe})
         if test is not None:
             held_out = evaluate_corpus(trainer, test, args.batch_size, args.test_tokens)
@@ -320,6 +344,9 @@ def run_reproduction(args, model_config) -> int:
                    output / "failure_context.pt")
         log({"kind": "numerical_divergence", "step": trainer.step, "message": failure,
              "tokens_seen": trainer.tokens_seen, "last_healthy_checkpoint": str(last_healthy)})
+    except torch.cuda.OutOfMemoryError as error:
+        status, failure = "out_of_memory", str(error)
+        log({"kind": "out_of_memory", "step": trainer.step, "message": failure})
     except KeyboardInterrupt:
         status = "interrupted"
         # Never label a checkpoint with unsaved partial accumulation as replayable.
@@ -335,5 +362,7 @@ def run_reproduction(args, model_config) -> int:
                    "completed_updates": trainer.step, "tokens_seen": trainer.tokens_seen,
                    "events": monitor.counts, "last_healthy_checkpoint": str(last_healthy),
                    "elapsed_seconds": time.perf_counter() - started,
-                   "scope": "Observed horizon only; no causal or permanent-stability conclusion"})
-    return 42 if failure else (130 if status == "interrupted" else 0)
+                   "scope": "Performance profile only" if profile else "Observed horizon only; no causal or permanent-stability conclusion"})
+        if profile:
+            profile.finish(status)
+    return 43 if status == "out_of_memory" else (42 if failure else (130 if status == "interrupted" else 0))
